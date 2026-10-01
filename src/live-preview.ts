@@ -16,25 +16,33 @@ import { QuickLinkMacro, RawLink, transformLink } from "./quick-links";
 
 interface QuickLinkSlice {
   linkToInsert: RawLink;
+  // was the original link an external link?
   externalLink: boolean;
   from: number;
   to: number;
-
-  // The part of the source that should be displayed as the link text.
-  displayFrom: number;
-  displayTo: number;
+  // what the user typed in the visible spot (alias/link text, else the raw
+  // target). Used as the label when transformLink gives no text.
+  fallbackText: string;
 }
 
 interface LinkPattern {
   debugName: string;
   nodes: string[];
+  // what index of `nodes` holds the link text (if any)
   textIndex: number | null;
+  // what index of `nodes` holds the link target
   targetIndex: number;
+  // Sometimes an 'em' node is merged with a link node; detect these cases to
+  // ensure that the output is italicized.
   checkForEm: boolean;
   isExternalLink: boolean;
 }
 
+// three kinds of links: plain internal, piped internal, and external
+//
+// each consists of a certain sequence of nodes
 const WIKI_LINK_PATTERNS: LinkPattern[] = [
+  // e.g., "[[w:New York City]]"
   {
     debugName: "plain_wikilink",
     nodes: [
@@ -47,6 +55,7 @@ const WIKI_LINK_PATTERNS: LinkPattern[] = [
     checkForEm: true,
     isExternalLink: false,
   },
+  // e.g., "[[w:Los Angeles|L.A.]]"
   {
     debugName: "piped_wikilink",
     nodes: [
@@ -64,6 +73,7 @@ const WIKI_LINK_PATTERNS: LinkPattern[] = [
 ];
 
 const EXTERNAL_LINK_PATTERNS: LinkPattern[] = [
+  // e.g., "[Buffalo](w:Buffalo, New York)"
   {
     debugName: "external_link",
     nodes: [
@@ -79,6 +89,7 @@ const EXTERNAL_LINK_PATTERNS: LinkPattern[] = [
     checkForEm: false,
     isExternalLink: true,
   },
+  // e.g., "[](w:Miami)"
   {
     debugName: "blank_external_link",
     nodes: [
@@ -92,6 +103,7 @@ const EXTERNAL_LINK_PATTERNS: LinkPattern[] = [
     checkForEm: false,
     isExternalLink: true,
   },
+  // same as external_link, but inside a list item
   {
     debugName: "external_link2",
     nodes: [
@@ -108,6 +120,9 @@ const EXTERNAL_LINK_PATTERNS: LinkPattern[] = [
     isExternalLink: true,
   },
 ];
+
+// defined by esbuild
+declare var DEBUG: boolean;
 
 class LivePreviewQuickLinksPluginValue implements PluginValue {
   decorations: DecorationSet;
@@ -130,31 +145,35 @@ class LivePreviewQuickLinksPluginValue implements PluginValue {
     }
 
     const builder = new RangeSetBuilder<Decoration>();
-
     this.slices = [];
     this.findQuickLinks(view, this.slices);
     this.processQuickLinks(view, builder);
-
     return builder.finish();
   }
 
-  findQuickLinks(
-    view: EditorView,
-    slices: QuickLinkSlice[],
-  ): void {
-    // @ts-ignore
+  findQuickLinks(view: EditorView, slices: QuickLinkSlice[]): void {
+    // TODO: find a better way to access this
     const settings: QuickLinksSettings =
+      // @ts-ignore
       app.plugins.plugins["quick-links"].settings;
-
     const quickLinksMap = getQuickLinksMap(settings);
 
+    // collect nodes into a flat list
     const nodes: SyntaxNode[] = [];
-
     for (const { from, to } of view.visibleRanges) {
       syntaxTree(view.state).iterate({
         from,
         to,
         enter: (node: SyntaxNodeRef) => {
+          if (DEBUG) {
+            console.group();
+            console.debug("Found node:", node.node.type.name);
+            console.debug(
+              "Markdown source:",
+              view.state.sliceDoc(node.from, node.to),
+            );
+            console.groupEnd();
+          }
           nodes.push(node.node);
         },
       });
@@ -165,15 +184,18 @@ class LivePreviewQuickLinksPluginValue implements PluginValue {
       : EXTERNAL_LINK_PATTERNS;
 
     for (const pattern of patterns) {
+      if (DEBUG) {
+        console.debug(`Searching for ${pattern.debugName}`);
+      }
+
       for (const chunk of findChunks(nodes, pattern.nodes)) {
+        console.assert(chunk.length === pattern.nodes.length);
         const from = chunk[0].from;
         const to = chunk[chunk.length - 1].to;
-
         const target = view.state.sliceDoc(
           chunk[pattern.targetIndex].from,
           chunk[pattern.targetIndex].to,
         );
-
         const text =
           pattern.textIndex === null
             ? ""
@@ -182,150 +204,79 @@ class LivePreviewQuickLinksPluginValue implements PluginValue {
                 chunk[pattern.textIndex].to,
               );
 
-        const em = pattern.checkForEm
-          ? chunk[0].name.startsWith("em")
-          : false;
-
+        const em = pattern.checkForEm ? chunk[0].name.startsWith("em") : false;
         const link = { text, target, em };
-
-        const maybeLink = transformLink(link, quickLinksMap);
-
-        if (maybeLink === null) {
-          continue;
+        if (DEBUG) {
+          console.debug(`Found link (${pattern.debugName})`, link);
         }
-
-        /*
-         * Determine which source characters represent the visible
-         * link text.
-         *
-         * For [[w:New York]]:
-         *   displayFrom = beginning of "w:New York"
-         *   displayTo   = end of "w:New York"
-         *
-         * For [[w:New York|NY]]:
-         *   displayFrom = beginning of "NY"
-         *   displayTo   = end of "NY"
-         *
-         * For [Buffalo](w:Buffalo):
-         *   displayFrom = beginning of "Buffalo"
-         *   displayTo   = end of "Buffalo"
-         */
-        let displayFrom: number;
-        let displayTo: number;
-
-        if (pattern.debugName === "plain_wikilink") {
-          displayFrom = chunk[1].from + patternPrefixLength(
-            view.state.sliceDoc(chunk[1].from, chunk[1].to),
-          );
-          displayTo = chunk[1].to;
-        } else if (pattern.debugName === "piped_wikilink") {
-          displayFrom = chunk[3].from;
-          displayTo = chunk[3].to;
-        } else if (
-          pattern.debugName === "external_link" ||
-          pattern.debugName === "external_link2"
-        ) {
-          displayFrom = chunk[1].from;
-          displayTo = chunk[1].to;
-        } else {
-          // Blank external links have no visible text.
-          displayFrom = chunk[0].to;
-          displayTo = chunk[0].to;
-        }
-
-        slices.push({
-          linkToInsert: maybeLink,
-          externalLink: pattern.isExternalLink,
-          from,
-          to,
-          displayFrom,
-          displayTo,
-        });
+        this.handleLink(
+          link,
+          pattern.isExternalLink,
+          { from, to },
+          slices,
+          quickLinksMap,
+        );
       }
     }
+  }
+
+  handleLink(
+    link: RawLink,
+    externalLink: boolean,
+    { from, to }: { from: number; to: number },
+    slices: QuickLinkSlice[],
+    quickLinksMap: Map<string, QuickLinkMacro>,
+  ): void {
+    const maybeLink = transformLink(link, quickLinksMap);
+    if (maybeLink === null) return;
+
+    slices.push({
+      linkToInsert: maybeLink,
+      externalLink,
+      from,
+      to,
+      // alias / link text if present, otherwise the raw target ("w:Miami")
+      fallbackText: link.text || link.target,
+    });
   }
 
   processQuickLinks(
     view: EditorView,
     builder: RangeSetBuilder<Decoration>,
   ): void {
-    this.slices.sort((a, b) => a.from - b.from);
+    this.slices.sort((a, b) => a.from - b.from || a.to - b.to);
 
     const cursorHead = view.state.selection.main.head;
+    let lastTo = -1;
 
     for (const slice of this.slices) {
-      /*
-       * When the cursor is inside the link, don't decorate it.
-       * This leaves the original Markdown completely editable.
-       */
-      if (slice.from <= cursorHead && cursorHead <= slice.to) {
-        continue;
-      }
+      // skip slices that overlap one we already added
+      // (e.g. two patterns matching the same text)
+      if (slice.from < lastTo) continue;
 
-      /*
-       * Hide the Markdown syntax surrounding the useful text.
-       *
-       * We intentionally do NOT replace the whole link anymore.
-       * This is the important change.
-       */
-      if (slice.displayFrom > slice.from) {
-        builder.add(
-          slice.from,
-          slice.displayFrom,
-          Decoration.replace({
-            widget: new EmptyWidget(),
-          }),
-        );
-      }
+      // cursor inside the link: show the raw Markdown
+      if (slice.from <= cursorHead && cursorHead <= slice.to) continue;
 
-      if (slice.displayTo < slice.to) {
-        builder.add(
-          slice.displayTo,
-          slice.to,
-          Decoration.replace({
-            widget: new EmptyWidget(),
-          }),
-        );
-      }
-
-      /*
-       * Replace only the visible text with the actual clickable
-       * external link.
-       *
-       * The source Markdown remains intact outside the widget.
-       */
-      if (slice.displayFrom < slice.displayTo) {
-        builder.add(
-          slice.displayFrom,
-          slice.displayTo,
-          Decoration.replace({
-            widget: new QuickLinksWidget(slice),
-          }),
-        );
-      }
+      builder.add(
+        slice.from,
+        slice.to,
+        Decoration.replace({ widget: new QuickLinksWidget(slice) }),
+      );
+      lastTo = slice.to;
     }
   }
 }
 
-function patternPrefixLength(target: string): number {
-  const colon = target.indexOf(":");
-
-  if (colon === -1) {
-    return 0;
-  }
-
-  return colon + 1;
-}
+type ChunkPattern = string[];
 
 function findChunks(
   nodes: SyntaxNode[],
-  pattern: string[],
+  pattern: ChunkPattern,
 ): SyntaxNode[][] {
   const chunks: SyntaxNode[][] = [];
 
   for (let i = 0; i <= nodes.length - pattern.length; i++) {
     const chunk = nodes.slice(i, i + pattern.length);
-
     if (doesChunkMatch(chunk, pattern)) {
       chunks.push(chunk);
     }
@@ -336,27 +287,15 @@ function findChunks(
 
 function doesChunkMatch(
   chunk: SyntaxNodeRef[],
-  pattern: string[],
+  pattern: ChunkPattern,
 ): boolean {
   for (let i = 0; i < chunk.length; i++) {
-    if (!chunk[i].name.includes(pattern[i])) {
+    if (!chunk[i].name.includes(pattern[i] as string)) {
       return false;
     }
   }
 
   return true;
-}
-
-class EmptyWidget extends WidgetType {
-  toDOM(): HTMLElement {
-    const el = document.createElement("span");
-    el.className = "quick-links-hidden-syntax";
-    return el;
-  }
-
-  ignoreEvent(): boolean {
-    return true;
-  }
 }
 
 class QuickLinksWidget extends WidgetType {
@@ -368,28 +307,22 @@ class QuickLinksWidget extends WidgetType {
   }
 
   eq(other: QuickLinksWidget): boolean {
+    const a = this.slice;
+    const b = other.slice;
     return (
-      this.slice.linkToInsert.target ===
-        other.slice.linkToInsert.target &&
-      this.slice.linkToInsert.text ===
-        other.slice.linkToInsert.text &&
-      this.slice.linkToInsert.em ===
-        other.slice.linkToInsert.em
+      a.linkToInsert.target === b.linkToInsert.target &&
+      a.linkToInsert.text === b.linkToInsert.text &&
+      a.linkToInsert.em === b.linkToInsert.em &&
+      a.fallbackText === b.fallbackText
     );
   }
 
   toDOM(): HTMLElement {
     const el = document.createElement("a");
-
-    el.textContent = this.slice.linkToInsert.text;
+    el.textContent = this.slice.linkToInsert.text || this.slice.fallbackText;
 
     el.classList.add("external-link");
-
-    el.setAttribute(
-      "href",
-      this.slice.linkToInsert.target,
-    );
-
+    el.setAttribute("href", this.slice.linkToInsert.target);
     el.setAttribute("rel", "noopener");
     el.setAttribute("target", "_blank");
 
@@ -403,19 +336,9 @@ class QuickLinksWidget extends WidgetType {
   }
 }
 
-export const LivePreviewQuickLinksPlugin =
-  ViewPlugin.fromClass(
-    LivePreviewQuickLinksPluginValue,
-    {
-      decorations: (
-        value: LivePreviewQuickLinksPluginValue,
-      ) => value.decorations,
-    },
-  );
-
-
-Then add this to the plugin's styles.css:
-
-.quick-links-hidden-syntax {
-  display: none;
-}
+export const LivePreviewQuickLinksPlugin = ViewPlugin.fromClass(
+  LivePreviewQuickLinksPluginValue,
+  {
+    decorations: (value: LivePreviewQuickLinksPluginValue) => value.decorations,
+  },
+);
