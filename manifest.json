@@ -1,10 +1,9 @@
 {
 	"id": "quick-links",
 	"name": "Quick Links",
-	"version": "0.2.6",
+	"version": "0.1.1",
 	"minAppVersion": "0.15.0",
 	"description": "Create quick link shortcuts to Wikipedia and other sites",
-	"author": "Ian Fisher",
-	"authorUrl": "https://iafisher.com",
+	"author": "Ian Fisher, Git-North",
 	"isDesktopOnly": false
 }

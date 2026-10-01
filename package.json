@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-quick-links",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Obsidian plugin to create quick link shortcuts",
 	"main": "main.js",
 	"scripts": {
@@ -10,7 +10,7 @@
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
 	"keywords": [],
-	"author": "Ian Fisher",
+	"author": "Ian Fisher, Git-North",
 	"license": "MIT",
 	"devDependencies": {
 		"@types/node": "^16.11.6",

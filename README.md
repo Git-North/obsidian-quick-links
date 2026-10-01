@@ -1,3 +1,7 @@
+This is a fork that fixes the problems with the text rendering when the cursor is not on that specific line.
+original author website: https://iafisher.com
+
+-- Original Readme -- 
 # Obsidian Quick Links
 Create shortcuts to quickly link to external sites in [Obsidian](https://obsidian.md).
 
