@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-quick-links",
-	"version": "0.1.1",
+	"version": "0.3.0",
 	"description": "Obsidian plugin to create quick link shortcuts",
 	"main": "main.js",
 	"scripts": {
